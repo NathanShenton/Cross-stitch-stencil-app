@@ -171,9 +171,13 @@ st.subheader("1) Crop")
 if HAS_CROPPER:
     st.caption("Drag to crop. Double-tap handles on mobile.")
     cropped = st_cropper(
-        orig, realtime_update=True, aspect_ratio=None, box_color="#00FFAA",
-        return_type="pil", key="cropper",
-    )
+    orig,
+    realtime_update=True,
+    aspect_ratio=None,
+    box_color="#00FFAA",
+    return_type="image",  # ✅ valid: "image" or "array"
+    key="cropper",
+)
 else:
     st.warning("`streamlit-cropper` not installed — showing original. "
                "Install with `pip install streamlit-cropper` for interactive cropping.")

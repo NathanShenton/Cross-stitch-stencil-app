@@ -1,3 +1,4 @@
+# app.py — Clickable cross-stitch grid with translucent stencil + robust clicks + micro grid
 import io
 from dataclasses import dataclass
 import numpy as np
@@ -8,8 +9,8 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 st.set_page_config(page_title="Cross-Stitch Grid + Stencil", layout="wide")
-st.title("🧵 Clickable Cross-Stitch Grid + Stencil")
-st.caption("Click squares to toggle stitches. Optional translucent stencil overlay. Export to PDF.")
+st.title("🧵 Cross-Stitch Grid + Stencil (robust clicks)")
+st.caption("Click squares to paint/erase. Optional translucent stencil overlay. Export to PDF.")
 
 # ---------------- Session state ----------------
 @dataclass
@@ -36,7 +37,6 @@ with st.sidebar:
     with c2:
         new_w = st.number_input("Cols", min_value=5, max_value=200, value=W, step=1)
     if (new_h, new_w) != (H, W):
-        # keep a snapshot for undo and re-init grid with new size
         st.session_state.history.append(grid.copy())
         init_state(new_h, new_w)
         grid = st.session_state.grid
@@ -49,6 +49,7 @@ with st.sidebar:
     st.subheader("Grid look")
     show_10_grid = st.checkbox("Bold every 10 stitches", value=True)
     number_every = st.selectbox("Numbering interval", [5, 10], index=1)
+    micro_grid = st.checkbox("Show micro grid (every stitch)", value=True)
 
     st.subheader("Stencil (optional)")
     stencil_file = st.file_uploader("Image (PNG/JPG)", type=["png", "jpg", "jpeg"])
@@ -63,8 +64,7 @@ with st.sidebar:
         if st.button("Undo"):
             if st.session_state.history:
                 st.session_state.grid = st.session_state.history.pop()
-                grid = st.session_state.grid
-                H, W = grid.shape
+                grid = st.session_state.grid; H, W = grid.shape
     with a2:
         if st.button("Clear"):
             st.session_state.history.append(grid.copy())
@@ -80,19 +80,22 @@ def load_stencil_mask(file, target_h, target_w, thr: float, invert: bool):
         return None
     im = Image.open(file).convert("L")  # grayscale
     im = im.resize((target_w, target_h), Image.Resampling.LANCZOS)
-    arr = np.asarray(im, dtype=np.float32) / 255.0  # 0=black, 1=white
+    arr = np.asarray(im, dtype=np.float32) / 255.0  # 0 black .. 1 white
     if invert:
         arr = 1.0 - arr
-    mask = (arr < thr).astype(np.float32)  # 1=black, 0=white
+    mask = (arr < thr).astype(np.float32)  # 1 = black ink, 0 = clear
+    # If completely blank (all 0), return anyway; user can tweak threshold
     return mask
 
 stencil = load_stencil_mask(stencil_file, H, W, stencil_threshold, stencil_invert)
 
-# ---------------- Figure ----------------
+# ---------------- Figure (stencil + grid + invisible click mesh) ----------------
 def make_fig(g: np.ndarray, stencil_mask: np.ndarray | None):
+    # Heatmap expects origin bottom-left; we flip Y for visual top-left
     layers = []
+
+    # 1) Stencil UNDERLAY (click-through)
     if stencil_mask is not None:
-        # Draw stencil UNDER the grid (so clicks reach the grid trace)
         layers.append(
             go.Heatmap(
                 z=stencil_mask[::-1, :],
@@ -100,39 +103,70 @@ def make_fig(g: np.ndarray, stencil_mask: np.ndarray | None):
                 colorscale=[[0.0, "rgba(0,0,0,0)"], [1.0, "rgba(0,0,0,1)"]],
                 opacity=stencil_opacity,
                 x=np.arange(W), y=np.arange(H),
-                hoverinfo="skip"
+                hoverinfo="skip",
+                zsmooth=False,
             )
         )
+
+    # 2) Filled grid
     layers.append(
         go.Heatmap(
-            z=g[::-1, :],
+            z=g[::-1, :],  # 1=black, 0=white
             showscale=False,
             colorscale=[[0.0, "#FFFFFF"], [1.0, "#000000"]],
             x=np.arange(W), y=np.arange(H),
             hovertemplate="x=%{x}, y=%{y}<extra></extra>",
+            zsmooth=False,
         )
     )
+
+    # 3) Invisible click mesh: one point per cell center to capture precise clicks
+    xs, ys = np.meshgrid(np.arange(W), np.arange(H))
+    layers.append(
+        go.Scattergl(
+            x=xs.flatten(), y=(H - 1 - ys).flatten(),  # already inverted
+            mode="markers",
+            marker=dict(size=12, color="rgba(0,0,0,0.001)"),  # (almost) invisible but clickable
+            hoverinfo="skip",
+            showlegend=False,
+            name="click-mesh",
+        )
+    )
+
     fig = go.Figure(data=layers)
     fig.update_layout(
         margin=dict(l=10, r=10, t=10, b=10),
-        clickmode="event+select",     # IMPORTANT for click events
+        clickmode="event+select",
         dragmode=False,
-        uirevision="keep",            # keep zoom on rerender
+        uirevision="keep",
         plot_bgcolor="white",
-        height=min(800, 14 * H),
-        xaxis=dict(constrain="domain", tickmode="linear", dtick=1, showgrid=False),
-        yaxis=dict(constrain="domain", tickmode="linear", dtick=1, showgrid=False, scaleanchor="x", scaleratio=1),
+        height=min(900, 16 * H),
+        width=None,
+        xaxis=dict(
+            constrain="domain", tickmode="linear", dtick=1,
+            showgrid=micro_grid, gridcolor="rgba(0,0,0,0.18)", gridwidth=1,
+            range=[-0.5, W - 0.5]
+        ),
+        yaxis=dict(
+            constrain="domain", tickmode="linear", dtick=1,
+            showgrid=micro_grid, gridcolor="rgba(0,0,0,0.18)", gridwidth=1,
+            scaleanchor="x", scaleratio=1, range=[-0.5, H - 0.5]
+        ),
     )
-    # Bold 10×10
+
+    # Bold 10×10 and border
     shapes = []
     step = 10 if show_10_grid else 10_000
     for x in range(0, W + 1, step):
-        shapes.append(dict(type="line", x0=x-0.5, x1=x-0.5, y0=-0.5, y1=H-0.5, line=dict(width=2, color="rgba(0,0,0,0.35)")))
+        shapes.append(dict(type="line", x0=x-0.5, x1=x-0.5, y0=-0.5, y1=H-0.5,
+                           line=dict(width=2, color="rgba(0,0,0,0.4)")))
     for y in range(0, H + 1, step):
-        shapes.append(dict(type="line", x0=-0.5, x1=W-0.5, y0=y-0.5, y1=y-0.5, line=dict(width=2, color="rgba(0,0,0,0.35)")))
-    shapes.append(dict(type="rect", x0=-0.5, y0=-0.5, x1=W-0.5, y1=H-0.5, line=dict(width=2.5, color="rgba(0,0,0,0.6)"),
-                       fillcolor="rgba(0,0,0,0)"))
+        shapes.append(dict(type="line", x0=-0.5, x1=W-0.5, y0=y-0.5, y1=y-0.5,
+                           line=dict(width=2, color="rgba(0,0,0,0.4)")))
+    shapes.append(dict(type="rect", x0=-0.5, y0=-0.5, x1=W-0.5, y1=H-0.5,
+                       line=dict(width=2.5, color="rgba(0,0,0,0.7)"), fillcolor="rgba(0,0,0,0)"))
     fig.update_layout(shapes=shapes)
+
     # Edge numbers
     ann = []
     for x in range(0, W, number_every):
@@ -147,52 +181,63 @@ def make_fig(g: np.ndarray, stencil_mask: np.ndarray | None):
 st.subheader("Editor")
 fig = make_fig(grid, stencil)
 
-# Use a unique key so Streamlit knows this interactive widget instance
+# IMPORTANT: unique key so clicks don't get stuck after resizing
 events = plotly_events(
     fig,
     click_event=True,
     select_event=False,
     hover_event=False,
-    override_height=None,
-    override_width=None,
-    key=f"grid_{H}x{W}",  # rerender when size changes
+    key=f"grid_clicks_{H}x{W}",
 )
 
-# ---------------- Edit functions ----------------
-def apply_point(px, py):
-    gy = H - 1 - int(py)  # plotly y is bottom-up on our heatmap
-    gx = int(px)
-    if 0 <= gx < W and 0 <= gy < H:
-        before = st.session_state.grid.copy()
-        if tool == "Paint":
-            st.session_state.grid[gy, gx] = 1
-        elif tool == "Erase":
-            st.session_state.grid[gy, gx] = 0
-        elif tool == "Rectangle Fill":
-            rb = st.session_state.rect_buf
-            if rb.start is None:
-                rb.start = (gx, gy)
-                return False  # wait for second point
-            else:
-                x0, y0 = rb.start
-                x1, y1 = gx, gy
-                xlo, xhi = sorted([x0, x1]); ylo, yhi = sorted([y0, y1])
-                st.session_state.grid[ylo:yhi+1, xlo:xhi+1] = 1
-                st.session_state.rect_buf.start = None
-        if not np.array_equal(before, st.session_state.grid):
-            st.session_state.history.append(before)
-        return True
-    return False
+# ---------------- Editing logic (using click-mesh pointNumber) ----------------
+def apply_point_from_event(e) -> bool:
+    # If clicking the click-mesh, event has 'curveNumber' of that trace (2) and a 'pointNumber'
+    curve = e.get("curveNumber", None)
+    pn = e.get("pointNumber", None)
+    x = e.get("x", None); y = e.get("y", None)
 
-# Apply clicks
+    # Prefer pointNumber (most reliable). Fall back to x/y if needed.
+    if curve == 2 and pn is not None:
+        gx = int(pn % W)
+        gy = int(pn // W)
+    elif x is not None and y is not None:
+        gx, gy = int(x), int(y)
+        gy = H - 1 - gy
+    else:
+        return False
+
+    if not (0 <= gx < W and 0 <= gy < H):
+        return False
+
+    before = st.session_state.grid.copy()
+    if tool == "Paint":
+        st.session_state.grid[gy, gx] = 1
+    elif tool == "Erase":
+        st.session_state.grid[gy, gx] = 0
+    elif tool == "Rectangle Fill":
+        rb = st.session_state.rect_buf
+        if rb.start is None:
+            rb.start = (gx, gy)
+            return False
+        else:
+            x0, y0 = rb.start; x1, y1 = gx, gy
+            xlo, xhi = sorted([x0, x1]); ylo, yhi = sorted([y0, y1])
+            st.session_state.grid[ylo:yhi+1, xlo:xhi+1] = 1
+            st.session_state.rect_buf.start = None
+
+    if not np.array_equal(before, st.session_state.grid):
+        st.session_state.history.append(before)
+    return True
+
 if events:
     for e in events:
-        x = int(e["x"]); y = int(e["y"])
-        finished = apply_point(x, y)
+        finished = apply_point_from_event(e)
         if tool == "Rectangle Fill" and finished and not multi_rect:
             break
+    st.experimental_rerun()  # ensure immediate visual update after a click
 
-st.write("Tip: In **Rectangle Fill**, click once to start and once to finish. Enable *Multi-rectangle mode* to draw several without refresh.")
+st.write("Tip: **Rectangle Fill** — click once to start, again to finish. Toggle *Multi-rectangle mode* to draw several before refresh.")
 
 # ---------------- PDF export ----------------
 def export_pdf(g: np.ndarray, stencil_mask: np.ndarray | None,
@@ -208,6 +253,7 @@ def export_pdf(g: np.ndarray, stencil_mask: np.ndarray | None,
 
     ax.imshow(g, cmap="gray_r", interpolation="nearest")
 
+    # micro grid every stitch
     ax.set_xticks(np.arange(-.5, W, 1), minor=True)
     ax.set_yticks(np.arange(-.5, H, 1), minor=True)
     ax.grid(which="minor", linewidth=0.25, color="0.75")
